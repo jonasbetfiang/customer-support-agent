@@ -1,12 +1,6 @@
 """
-Customer Support AI Agent — Starter Code
+Customer Support AI Agent — Solution
 ==========================================
-Your task is to complete this file by implementing all sections marked
-with # TODO comments.
-
-Reference the step-by-step solution files and INSTRUCTIONS.md for guidance.
-Do NOT copy the solution directly — work through each section yourself.
-
 Run locally (after filling in config values):
   uv run main.py '{"prompt": "Hello", "customer_id": "CUST-123", "session_id": "s1"}'
 
@@ -18,7 +12,6 @@ Invoke deployed agent:
 """
 
 # ── Imports ───────────────────────────────────────────────────────────────────
-# These imports are provided. Do not remove them.
 from strands import Agent, tool
 from bedrock_agentcore.runtime import BedrockAgentCoreApp
 from bedrock_agentcore.memory import MemoryClient
@@ -34,7 +27,8 @@ import logging
 import uuid
 from typing import Dict
 from bedrock_agentcore.tools.code_interpreter_client import code_session
-from strands_tools.browser import AgentCoreBrowser
+import urllib.request
+from bs4 import BeautifulSoup
 
 
 logging.basicConfig(level=logging.WARNING)
@@ -46,13 +40,11 @@ app = BedrockAgentCoreApp()
 # Suppress interactive tool-consent prompts (required in headless deployments).
 os.environ["BYPASS_TOOL_CONSENT"] = "true"
 
-
 # ── Configuration ──────────────────────────────────────────────────────────────
-# >>> FILL IN YOUR REAL VALUES FROM PART 1 OF THE INSTRUCTIONS <<<
-GATEWAY_URL = "https://customersupportgateway-2e9pfx19oe.gateway.bedrock-agentcore.us-east-1.amazonaws.com/mcp"   # e.g. https://xxxxx.gateway.bedrock-agentcore.us-east-1.amazonaws.com/mcp
-KB_ID       = "ONG4BY7VCI"          # Knowledge Base ID from the Bedrock console
-REGION      = "us-east-1"        # e.g. "us-east-1"
-MEMORY_ID   = "CustomerSupportMemory-WXmjx15eyQ"        # Memory ID from the AgentCore Memory console
+GATEWAY_URL = "https://customersupportgateway-2e9pfx19oe.gateway.bedrock-agentcore.us-east-1.amazonaws.com/mcp"
+KB_ID       = "ONG4BY7VCI"
+REGION      = "us-east-1"
+MEMORY_ID   = "CustomerSupportMemory-WXmjx15eyQ"
 
 
 # ── Model and Clients ────────────────────────────────────────────────────────
@@ -91,8 +83,6 @@ class MemoryHook(HookProvider):
         """Retrieve relevant memories and prepend them to the user message."""
         message = event.message
 
-        # Only act on plain-text user messages — skip assistant messages
-        # and tool-result messages (which also arrive with role="user").
         if message.get("role") != "user":
             return
         content = message.get("content", [])
@@ -130,8 +120,6 @@ class MemoryHook(HookProvider):
         customer_query = None
         agent_response = None
 
-        # Walk backwards to find the last plain-text assistant reply and
-        # the last plain-text user query, skipping tool use/result blocks.
         for msg in reversed(messages):
             content = msg.get("content", [])
             if not content or "text" not in content[0]:
@@ -169,12 +157,6 @@ def search_knowledge_base(query: str) -> str:
     Search the Amazon product catalog and support knowledge base.
     Use this for product specifications, return policies, warranty
     information, loyalty program details, and order status definitions.
-
-    Args:
-        query: The question or topic to search for
-
-    Returns:
-        Relevant information retrieved from the knowledge base
     """
     if not KB_ID or KB_ID == "<kbid>":
         return "Knowledge base not configured."
@@ -207,15 +189,6 @@ def calculate_loyalty_discount(
     """
     Calculate the loyalty discount for a customer order using the
     AgentCore Code Interpreter. Runs exact arithmetic in a secure sandbox.
-
-    Args:
-        loyalty_points:   Customer's current points balance
-        tier:             Customer tier — Silver, Gold, or Platinum
-        order_total:      Order total in USD
-        product_category: standard, device, or fresh
-
-    Returns:
-        Full discount breakdown and final price
     """
     code = f"""
 import json
@@ -228,7 +201,6 @@ tier = "{tier}"
 order_total = {order_total}
 product_category = "{product_category}"
 
-# Redeem points: 100 points = $1, floor to nearest 500, capped at 50% of order value.
 POINTS_PER_DOLLAR = 100
 max_points_by_order_cap = int(order_total * 0.5 * POINTS_PER_DOLLAR)
 points_redeemed = min(loyalty_points, max_points_by_order_cap)
@@ -278,7 +250,6 @@ print(json.dumps(result))
 
     except Exception as e:
         logger.warning(f"Code Interpreter unavailable, using fallback: {e}")
-        # Fallback: tier discount only, no points redemption math.
         tier_rates = {"Silver": 0.00, "Gold": 0.10, "Platinum": 0.15}
         tier_rate = tier_rates.get(tier, 0.0)
         tier_discount = order_total * tier_rate
@@ -289,27 +260,49 @@ print(json.dumps(result))
             "tier_discount_rate": tier_rate,
             "tier_discount_value": round(tier_discount, 2),
             "final_total": final_total,
-            "note": "Code Interpreter unavailable — only the tier discount was applied; points redemption was not calculated.",
+            "note": "Code Interpreter unavailable — only tier discount applied.",
         })
+
+
+# ── Web Fetching Tool (Lightweight Web Scraping) ──────────────────────────────
+@tool
+def fetch_web_page(url: str) -> str:
+    """
+    Fetch and return the HTML page title and clean body text content for a given URL.
+    Use this tool whenever you need to visit or fetch content from web pages.
+    """
+    try:
+        req = urllib.request.Request(
+            url,
+            headers={
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36"
+            }
+        )
+        with urllib.request.urlopen(req, timeout=10) as response:
+            html = response.read().decode("utf-8", errors="ignore")
+            soup = BeautifulSoup(html, "html.parser")
+            
+            title = soup.title.string.strip() if soup.title and soup.title.string else "No title found"
+            
+            for element in soup(["script", "style", "nav", "footer"]):
+                element.extract()
+                
+            text = soup.get_text(separator=" ", strip=True)[:2000]
+            return f"Page Title: {title}\n\nContent Sample:\n{text}"
+    except Exception as e:
+        logger.warning(f"Failed to fetch {url}: {e}")
+        return f"Error fetching web page: {e}"
 
 
 # ── Agent Entrypoint ─────────────────────────────────────────────────────────
 @app.entrypoint
 async def invoke(payload, context=None):
-    """
-    Main handler called by AgentCore for every incoming request.
-
-    Expected payload keys:
-      prompt      (str, required) — the customer's message
-      customer_id (str, optional) — unique customer identifier
-      session_id  (str, optional) — session identifier; generated if absent
-    """
+    """Main handler called by AgentCore for every incoming request."""
     try:
         user_input = payload.get("prompt", "")
         actor_id = payload.get("customer_id", "anonymous")
         session_id = payload.get("session_id") or str(uuid.uuid4())
 
-        # Long-term memory hook for this customer/session.
         memory_hook = MemoryHook(
             actor_id=actor_id,
             session_id=session_id,
@@ -317,18 +310,12 @@ async def invoke(payload, context=None):
             memory_id=MEMORY_ID,
         )
 
-        # Browser tool, region-scoped.
-        agent_core_browser = AgentCoreBrowser(region=REGION)
-
-        # Local tools always available to the agent.
         tools = [
             search_knowledge_base,
             calculate_loyalty_discount,
-            agent_core_browser.browser,
+            fetch_web_page,
         ]
 
-        # Connect to the Gateway (No Authorization) and pull in its
-        # MCP-exposed tools (order lookup routes + the three refund tools).
         gateway_client = MCPClient(lambda: streamable_http_client(GATEWAY_URL))
 
         with gateway_client:
@@ -344,8 +331,8 @@ async def invoke(payload, context=None):
                     "e-commerce company. Use your tools to look up orders "
                     "and customers, process refunds, search the knowledge "
                     "base for product info and policies, calculate loyalty "
-                    "discounts, and browse the web when a question needs "
-                    "current information you don't otherwise have. Be "
+                    "discounts, and fetch web pages when a question needs "
+                    "current information from a website URL. Be "
                     "concise, friendly, and accurate — never guess at order "
                     "or refund details, always look them up."
                 ),
@@ -360,14 +347,13 @@ async def invoke(payload, context=None):
         return f"I'm sorry, I ran into an error processing your request: {e}"
 
 
-# ── CLI entry point (do not modify) ──────────────────────────────────────────
+# ── CLI entry point ──────────────────────────────────────────────────────────
 def main():
     """Run one invocation from the command line for local testing."""
     parser = argparse.ArgumentParser()
     parser.add_argument("payload", type=str)
     args = parser.parse_args()
 
-    # Get or create an event loop safely
     try:
         loop = asyncio.get_event_loop()
     except RuntimeError:
@@ -379,5 +365,3 @@ def main():
 
 if __name__ == "__main__":
     app.run()
-    # Uncomment the line below and comment app.run() for local CLI testing:
-    #main()
